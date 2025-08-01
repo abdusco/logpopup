@@ -61,156 +61,217 @@ Options:
 
 class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var shouldAutoScroll = true
-    var scrollView: NSScrollView!
+    var scrollView: NSScrollView?
     let cliArgs: CLIArgs
+    private var signalSource: DispatchSourceSignal?
+    var window: NSWindow?
+    var textView: NSTextView?
+    var process: Process?
+    var outputPipe: Pipe?
+    var errorPipe: Pipe?
     
-    // Initialize with CLI arguments
     init(cliArgs: CLIArgs) {
         self.cliArgs = cliArgs
         super.init()
     }
     
-    // Terminate process when window closes
+    deinit {
+        cleanup()
+    }
+    
     func windowWillClose(_ notification: Notification) {
         terminateProcess()
     }
-    var window: NSWindow!
-    var textView: NSTextView!
-    var process: Process!
-    var outputPipe: Pipe!
-    var errorPipe: Pipe!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Set up signal handler for Ctrl+C
         setupSignalHandler()
-        
-        // Create menu
+        setupMenu()
+        setupWindow()
+        setupTextView()
+        runCommand()
+    }
+    
+    private func setupMenu() {
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         NSApp.mainMenu = mainMenu
 
         let appMenu = NSMenu()
-        // Quit menu item (Cmd+Q)
         appMenu.addItem(withTitle: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         appMenu.addItem(withTitle: "Exit", action: #selector(quitApp), keyEquivalent: "w")
         appMenuItem.submenu = appMenu
-
-        // Create window
+    }
+    
+    private func setupWindow() {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        // Set window title to command and bring to front
-        window.title = cliArgs.command ?? "logpopup"
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        window?.title = cliArgs.command ?? "logpopup"
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        window.delegate = self
-        // Create scrollable text view
-        scrollView = NSScrollView(frame: window.contentView!.bounds)
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autoresizingMask = [.width, .height]
-        textView = NSTextView(frame: scrollView.contentView.bounds)
-        textView.isEditable = false
-        textView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-        textView.autoresizingMask = [.width, .height]
-        scrollView.documentView = textView
-        window.contentView?.addSubview(scrollView)
+        window?.delegate = self
+    }
+    
+    private func setupTextView() {
+        guard let window = window, let contentView = window.contentView else { return }
+        
+        scrollView = NSScrollView(frame: contentView.bounds)
+        scrollView?.hasVerticalScroller = true
+        scrollView?.hasHorizontalScroller = false
+        scrollView?.autoresizingMask = [.width, .height]
+        
+        textView = NSTextView(frame: scrollView?.contentView.bounds ?? .zero)
+        textView?.isEditable = false
+        textView?.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        textView?.autoresizingMask = [.width, .height]
+        
+        scrollView?.documentView = textView
+        contentView.addSubview(scrollView!)
+        
         // Track user scroll position
-        scrollView.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(self, selector: #selector(scrollViewDidScroll), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
-        // Run command
-        runCommand()
+        scrollView?.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(scrollViewDidScroll),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView?.contentView
+        )
     }
 
     func setupSignalHandler() {
-        signal(SIGINT) { _ in
-            // Get the delegate and terminate the process
-            if let delegate = NSApp.delegate as? LogPopupApp {
-                delegate.terminateProcess()
-            }
+        signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signalSource?.setEventHandler { [weak self] in
+            self?.terminateProcess()
         }
+        signalSource?.resume()
+        
+        // Ignore SIGINT for the process (let DispatchSource handle it)
+        signal(SIGINT, SIG_IGN)
+    }
+    
+    private func cleanup() {
+        NotificationCenter.default.removeObserver(self)
+        
+        signalSource?.cancel()
+        signalSource = nil
+        
+        cleanupProcess()
+    }
+    
+    private func cleanupProcess() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
+        
+        if let process = process, process.isRunning {
+            process.terminate()
+        }
+        
+        outputPipe = nil
+        errorPipe = nil
+        process = nil
     }
 
     func terminateProcess() {
-        if self.process.isRunning {
-            self.process.terminate()
+        if let process = process, process.isRunning {
+            process.terminate()
             appendOutput("\n[Process terminated by user]\n")
         }
+        cleanup()
         NSApp.terminate(nil)
     }
 
     func runCommand() {
-        guard let command = cliArgs.command else { return }
+        guard let command = cliArgs.command else { 
+            appendOutput("Error: No command specified\n")
+            return 
+        }
+        
         process = Process()
-        process.launchPath = "/usr/bin/env"
-        process.arguments = [command] + cliArgs.commandArgs
-        process.environment = ProcessInfo.processInfo.environment
+        
+        process?.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process?.arguments = [command] + cliArgs.commandArgs
+        process?.environment = ProcessInfo.processInfo.environment
 
         outputPipe = Pipe()
         errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        process.standardInput = FileHandle.standardInput
+        process?.standardOutput = outputPipe
+        process?.standardError = errorPipe
+        process?.standardInput = FileHandle.standardInput
 
-        // Tee output
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // Tee output with better error handling
+        outputPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             if let str = String(data: data, encoding: .utf8) {
                 self?.appendOutput(str)
-                FileHandle.standardOutput.write(data)
+                do {
+                    try FileHandle.standardOutput.write(contentsOf: data)
+                } catch {
+                    // Handle write error silently to avoid crashes
+                }
             }
         }
-        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        
+        errorPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             if let str = String(data: data, encoding: .utf8) {
                 self?.appendOutput(str)
-                FileHandle.standardError.write(data)
+                do {
+                    try FileHandle.standardError.write(contentsOf: data)
+                } catch {
+                    // Handle write error silently to avoid crashes
+                }
             }
         }
 
         do {
-            try process.run()
+            try process?.run()
         } catch {
             appendOutput("Failed to run command: \(error)\n")
+            return
         }
 
         // Terminate app immediately if successful, else after 5 seconds (unless keepOnFail)
-        process.terminationHandler = { [weak self] proc in
-            self?.appendOutput("\n[Process exited with code: \(proc.terminationStatus)]\n")
+        process?.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                self?.appendOutput("\n[Process exited with code: \(proc.terminationStatus)]\n")
 
-            if proc.terminationStatus == 0 {
-                NSApp.terminate(nil)
-            } else if cliArgs.keepOnFail {
-                // Do nothing, keep window open
-            } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                if proc.terminationStatus == 0 {
                     NSApp.terminate(nil)
+                } else if self?.cliArgs.keepOnFail == true {
+                    // Do nothing, keep window open
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                        NSApp.terminate(nil)
+                    }
                 }
             }
         }
     }
 
     func appendOutput(_ str: String) {
-        DispatchQueue.main.async {
-            let font = self.textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let textView = self.textView else { return }
+            
+            let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
             let attributes: [NSAttributedString.Key: Any] = [.font: font]
             let attrStr = NSAttributedString(string: str, attributes: attributes)
-            self.textView.textStorage?.append(attrStr)
+            textView.textStorage?.append(attrStr)
+            
             if self.shouldAutoScroll {
-                self.textView.scrollToEndOfDocument(nil)
+                textView.scrollToEndOfDocument(nil)
             }
         }
     }
 
     @objc func scrollViewDidScroll(_ notification: Notification) {
-        guard let scrollView = self.scrollView else { return }
+        guard let scrollView = scrollView else { return }
         let visibleRect = scrollView.contentView.documentVisibleRect
         let documentRect = scrollView.documentView?.bounds ?? .zero
         // If at the bottom, enable auto-scroll
@@ -222,11 +283,12 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func quitApp() {
+        cleanup()
         NSApp.terminate(nil)
     }
 
     @objc func hideApp() {
-        window.orderBack(nil)
+        window?.orderBack(nil)
     }
 }
 
