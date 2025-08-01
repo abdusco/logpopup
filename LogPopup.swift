@@ -62,7 +62,14 @@ Options:
 class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var shouldAutoScroll = true
     var scrollView: NSScrollView!
-    var cliArgs: CLIArgs!
+    let cliArgs: CLIArgs
+    
+    // Initialize with CLI arguments
+    init(cliArgs: CLIArgs) {
+        self.cliArgs = cliArgs
+        super.init()
+    }
+    
     // Terminate process when window closes
     func windowWillClose(_ notification: Notification) {
         terminateProcess()
@@ -97,9 +104,6 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         // Set window title to command and bring to front
-        let args = CommandLine.arguments
-        let cliArgs = CLIArgs.parse(from: args)
-        self.cliArgs = cliArgs
         window.title = cliArgs.command ?? "logpopup"
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -141,7 +145,6 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func runCommand() {
-        let cliArgs = self.cliArgs!
         guard let command = cliArgs.command else { return }
         process = Process()
         process.launchPath = "/usr/bin/env"
@@ -238,8 +241,7 @@ if cliArgs.showVersion {
 }
 
 let app = NSApplication.shared
-let delegate = LogPopupApp()
-delegate.cliArgs = cliArgs
+let delegate = LogPopupApp(cliArgs: cliArgs)
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()
