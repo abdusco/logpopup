@@ -15,12 +15,13 @@ A mini macOS command-line utility that executes commands and shows their output 
 ## Usage
 
 ```bash
-logpopup [--keep-on-fail] [--help] [--version] <command> [args...]
+logpopup [options] <command> [args...]
 ```
 
 ### Options
 
 - `--keep-on-fail`: Keep window open if command fails (default: closes after 5 seconds)
+- `--on-top`: Keep the popup window on top of other windows
 - `--help`: Show help message and exit
 - `--version`: Show version and exit
 

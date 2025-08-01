@@ -5,6 +5,7 @@ var version = "dev" // to be replaced in CI
 
 struct CLIArgs {
     var keepOnFail: Bool
+    var onTop: Bool
     var showHelp: Bool
     var showVersion: Bool
     var command: String?
@@ -14,16 +15,18 @@ struct CLIArgs {
 logpopup executes a command and shows its output in a popup window.
 It combines stdout and stderr and tees the output to both the popup and the terminal.
 
-Usage: logpopup [--keep-on-fail] [--help] [--version] <command> [args...]
+Usage: logpopup [options] <command> [args...]
 
 Options:
   --keep-on-fail   Keep window open if command fails
+  --on-top         Keep window on top of other windows
   --help           Show this help message and exit
   --version        Show version and exit
 """
 
     static func parse(from args: [String]) -> CLIArgs {
         var keepOnFail = false
+        var onTop = false
         var showHelp = false
         var showVersion = false
         var command: String? = nil
@@ -33,6 +36,9 @@ Options:
             let arg = args[i]
             if arg == "--keep-on-fail" {
                 keepOnFail = true
+                i += 1
+            } else if arg == "--on-top" {
+                onTop = true
                 i += 1
             } else if arg == "--help" {
                 showHelp = true
@@ -51,6 +57,7 @@ Options:
         }
         return CLIArgs(
             keepOnFail: keepOnFail,
+            onTop: onTop,
             showHelp: showHelp,
             showVersion: showVersion,
             command: command,
@@ -69,6 +76,18 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var process: Process?
     var outputPipe: Pipe?
     var errorPipe: Pipe?
+    private var pinButton: NSButton!
+    private var keyEventMonitor: Any?
+    
+    public var isPinned: Bool {
+        get {
+            return window?.level == .floating
+        }
+        set {
+            window?.level = newValue ? .floating : .normal
+            updatePinButtonImage()
+        }
+    }
     
     init(cliArgs: CLIArgs) {
         self.cliArgs = cliArgs
@@ -77,6 +96,9 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     deinit {
         cleanup()
+        if let monitor = keyEventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
     
     func windowWillClose(_ notification: Notification) {
@@ -87,6 +109,8 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupSignalHandler()
         setupMenu()
         setupWindow()
+        setupPinButton()
+        setupKeyEventMonitor()
         setupTextView()
         runCommand()
     }
@@ -113,8 +137,63 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.title = cliArgs.command ?? "logpopup"
         window?.center()
         window?.makeKeyAndOrderFront(nil)
+        
+        // Keep window on top if requested
+        if cliArgs.onTop {
+            window?.level = .floating
+        }
+        
         NSApp.activate(ignoringOtherApps: true)
         window?.delegate = self
+    }
+    
+    private func setupPinButton() {
+        guard let window = self.window else { return }
+        
+        pinButton = NSButton(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+        pinButton.bezelStyle = .texturedRounded
+        pinButton.isBordered = false
+        pinButton.imagePosition = .imageOnly
+        pinButton.state = isPinned ? .on : .off
+        updatePinButtonImage()
+        pinButton.toolTip = "Keep window floating on top"
+        pinButton.target = self
+        pinButton.action = #selector(togglePin)
+        
+        // Position the button in the titlebar
+        if let titlebarView = window.standardWindowButton(.closeButton)?.superview {
+            titlebarView.addSubview(pinButton)
+            
+            if let closeButton = window.standardWindowButton(.closeButton) {
+                let margin: CGFloat = 6
+                let pinButtonX = titlebarView.frame.width - pinButton.frame.width - margin
+                let pinButtonY = closeButton.frame.minY
+                
+                pinButton.frame.origin = CGPoint(x: pinButtonX, y: pinButtonY)
+                pinButton.autoresizingMask = [.minXMargin]
+            }
+        }
+    }
+    
+    private func updatePinButtonImage() {
+        let imageName = isPinned ? "pin.fill" : "pin"
+        pinButton.image = NSImage(systemSymbolName: imageName, accessibilityDescription: isPinned ? "Unpin Window" : "Pin Window")
+    }
+    
+    @objc private func togglePin() {
+        isPinned.toggle()
+    }
+    
+    private func setupKeyEventMonitor() {
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { // ESC key
+                // Unfloat the window and move it to background
+                self?.isPinned = false
+                self?.window?.orderBack(nil)
+                return nil // Consume the event
+            }
+            return event // Pass other events through
+        }
     }
     
     private func setupTextView() {
