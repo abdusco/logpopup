@@ -78,6 +78,12 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var errorPipe: Pipe?
     private var pinButton: NSButton!
     private var keyEventMonitor: Any?
+    private let maxLines = 5000
+    private var lineCount = 0
+    
+    private var pendingOutput = ""
+    private var updateTimer: Timer?
+    private let updateInterval: TimeInterval = 0.016
     
     public var isPinned: Bool {
         get {
@@ -236,6 +242,15 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func cleanup() {
         NotificationCenter.default.removeObserver(self)
         
+        // Stop the update timer
+        updateTimer?.invalidate()
+        updateTimer = nil
+        
+        // Flush any pending output
+        if !pendingOutput.isEmpty {
+            flushPendingOutput()
+        }
+        
         signalSource?.cancel()
         signalSource = nil
         
@@ -336,16 +351,60 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func appendOutput(_ str: String) {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, let textView = self.textView else { return }
+            guard let self = self else { return }
+            
+            self.pendingOutput += str
+            
+            if self.updateTimer == nil {
+                self.updateTimer = Timer.scheduledTimer(withTimeInterval: self.updateInterval, repeats: false) { [weak self] _ in
+                    self?.flushPendingOutput()
+                }
+            }
+        }
+    }
+    
+    private func flushPendingOutput() {
+        guard let textView = self.textView, !pendingOutput.isEmpty else { return }
+        
+        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let attrStr = NSAttributedString(string: pendingOutput, attributes: attributes)
+        textView.textStorage?.append(attrStr)
+        
+        let newLines = pendingOutput.components(separatedBy: .newlines).count - 1
+        self.lineCount += newLines
+        
+        if self.lineCount > self.maxLines {
+            self.trimTextToLimit()
+        }
+        
+        if self.shouldAutoScroll {
+            textView.scrollToEndOfDocument(nil)
+        }
+        
+        pendingOutput = ""
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+    
+    private func trimTextToLimit() {
+        guard let textView = self.textView, let textStorage = textView.textStorage else { return }
+        
+        let text = textStorage.string
+        let lines = text.components(separatedBy: .newlines)
+        
+        if lines.count > maxLines {
+            // Keep the last (maxLines - 100) lines to avoid frequent trimming
+            let linesToKeep = maxLines - 100
+            let trimmedLines = Array(lines.suffix(linesToKeep))
+            let trimmedText = trimmedLines.joined(separator: "\n")
             
             let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
             let attributes: [NSAttributedString.Key: Any] = [.font: font]
-            let attrStr = NSAttributedString(string: str, attributes: attributes)
-            textView.textStorage?.append(attrStr)
+            let newAttrString = NSAttributedString(string: trimmedText, attributes: attributes)
             
-            if self.shouldAutoScroll {
-                textView.scrollToEndOfDocument(nil)
-            }
+            textStorage.setAttributedString(newAttrString)
+            lineCount = trimmedLines.count
         }
     }
 
@@ -354,7 +413,7 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let visibleRect = scrollView.contentView.documentVisibleRect
         let documentRect = scrollView.documentView?.bounds ?? .zero
         // If at the bottom, enable auto-scroll
-        if abs(visibleRect.maxY - documentRect.maxY) < 2.0 {
+        if abs(visibleRect.maxY - documentRect.maxY) < 50 {
             shouldAutoScroll = true
         } else {
             shouldAutoScroll = false
