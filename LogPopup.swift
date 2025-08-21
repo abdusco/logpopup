@@ -118,6 +118,7 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupPinButton()
         setupKeyEventMonitor()
         setupTextView()
+        setupAppearanceObserver()
         runCommand()
     }
     
@@ -215,6 +216,10 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         textView?.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         textView?.autoresizingMask = [.width, .height]
         
+        // Set up colors to follow system appearance
+        textView?.textColor = NSColor.labelColor
+        textView?.backgroundColor = NSColor.textBackgroundColor
+        
         scrollView?.documentView = textView
         contentView.addSubview(scrollView!)
         
@@ -226,6 +231,32 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: NSView.boundsDidChangeNotification,
             object: scrollView?.contentView
         )
+    }
+    
+    private func setupAppearanceObserver() {
+        // Listen for system appearance changes
+        DistributedNotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appearanceDidChange),
+            name: Notification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil
+        )
+    }
+    
+    @objc private func appearanceDidChange() {
+        updateTextViewAppearance()
+    }
+    
+    private func updateTextViewAppearance() {
+        guard let textView = self.textView else { return }
+        
+        // Update the text view colors
+        textView.textColor = NSColor.labelColor
+        textView.backgroundColor = NSColor.textBackgroundColor
+        
+        // Update existing text with new color
+        let fullRange = NSRange(location: 0, length: textView.textStorage?.length ?? 0)
+        textView.textStorage?.addAttribute(.foregroundColor, value: NSColor.labelColor, range: fullRange)
     }
 
     func setupSignalHandler() {
@@ -367,7 +398,10 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let textView = self.textView, !pendingOutput.isEmpty else { return }
         
         let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor
+        ]
         let attrStr = NSAttributedString(string: pendingOutput, attributes: attributes)
         textView.textStorage?.append(attrStr)
         
@@ -400,7 +434,10 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let trimmedText = trimmedLines.joined(separator: "\n")
             
             let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            let attributes: [NSAttributedString.Key: Any] = [.font: font]
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.labelColor
+            ]
             let newAttrString = NSAttributedString(string: trimmedText, attributes: attributes)
             
             textStorage.setAttributedString(newAttrString)
