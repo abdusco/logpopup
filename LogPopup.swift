@@ -289,8 +289,17 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     private func cleanupProcess() {
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
+        // Clear readability handlers before releasing pipes
+        if let outputHandle = outputPipe?.fileHandleForReading {
+            outputHandle.readabilityHandler = nil
+            // Ensure the file handle is closed properly
+            try? outputHandle.close()
+        }
+        if let errorHandle = errorPipe?.fileHandleForReading {
+            errorHandle.readabilityHandler = nil
+            // Ensure the file handle is closed properly
+            try? errorHandle.close()
+        }
         
         if let process = process, process.isRunning {
             process.terminate()
