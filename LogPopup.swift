@@ -340,7 +340,10 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Tee output with better error handling
         outputPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8) {
                 self?.appendOutput(str)
                 do {
@@ -353,7 +356,10 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         errorPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8) {
                 self?.appendOutput(str)
                 do {
