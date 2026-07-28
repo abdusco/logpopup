@@ -17,7 +17,7 @@ sed "s/var version = \".*\"/var version = \"$VERSION_CLEAN\"/" LogPopup.swift > 
 
 
 # Build the binary with version info
-swiftc -o logpopup-${ARCH} LogPopup.build.swift \
+swiftc -target ${ARCH}-apple-macos12.0 -o logpopup-${ARCH} LogPopup.build.swift \
   -framework Cocoa -framework WebKit -framework Foundation -framework AppKit
 
 # Clean up temporary build file
