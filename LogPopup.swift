@@ -3,6 +3,131 @@ import AppKit
 
 var version = "dev" // to be replaced in CI
 
+private enum OutputStream {
+    case standardOutput
+    case standardError
+}
+
+/// Removes terminal control sequences while retaining the visible text.
+///
+/// Pipe reads can split an escape sequence across multiple chunks, so the parser
+/// retains its state between calls instead of using a per-chunk regular expression.
+private struct ANSISanitizer {
+    private enum State {
+        case normal
+        case escape
+        case escapeIntermediate
+        case csi
+        case osc
+        case oscEscape
+        case controlString
+        case controlStringEscape
+    }
+
+    private var state = State.normal
+
+    mutating func sanitize(_ input: String) -> String {
+        var output = ""
+
+        for scalar in input.unicodeScalars {
+            consume(scalar, into: &output)
+        }
+
+        return output
+    }
+
+    private mutating func consume(_ scalar: Unicode.Scalar, into output: inout String) {
+        let value = scalar.value
+
+        switch state {
+        case .normal:
+            switch value {
+            case 0x1B:
+                state = .escape
+            case 0x9B:
+                state = .csi
+            case 0x9D:
+                state = .osc
+            case 0x90, 0x98, 0x9E, 0x9F:
+                state = .controlString
+            case 0x80...0x9F:
+                break
+            default:
+                output.unicodeScalars.append(scalar)
+            }
+
+        case .escape:
+            switch value {
+            case 0x1B:
+                break
+            case 0x5B: // [
+                state = .csi
+            case 0x5D: // ]
+                state = .osc
+            case 0x50, 0x58, 0x5E, 0x5F: // P, X, ^, _
+                state = .controlString
+            case 0x20...0x2F:
+                state = .escapeIntermediate
+            case 0x30...0x7E:
+                state = .normal
+            default:
+                state = .normal
+                consume(scalar, into: &output)
+            }
+
+        case .escapeIntermediate:
+            switch value {
+            case 0x1B:
+                state = .escape
+            case 0x20...0x2F:
+                break
+            case 0x30...0x7E:
+                state = .normal
+            default:
+                state = .normal
+                consume(scalar, into: &output)
+            }
+
+        case .csi:
+            if value == 0x1B {
+                state = .escape
+            } else if value >= 0x40 && value <= 0x7E {
+                state = .normal
+            }
+
+        case .osc:
+            if value == 0x07 || value == 0x9C {
+                state = .normal
+            } else if value == 0x1B {
+                state = .oscEscape
+            }
+
+        case .oscEscape:
+            if value == 0x5C { // \
+                state = .normal
+            } else if value == 0x07 {
+                state = .normal
+            } else if value != 0x1B {
+                state = .osc
+            }
+
+        case .controlString:
+            if value == 0x9C {
+                state = .normal
+            } else if value == 0x1B {
+                state = .controlStringEscape
+            }
+
+        case .controlStringEscape:
+            if value == 0x5C { // \
+                state = .normal
+            } else if value != 0x1B {
+                state = .controlString
+            }
+        }
+    }
+}
+
 struct CLIArgs {
     var keepOnFail: Bool
     var onTop: Bool
@@ -84,6 +209,8 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var pendingOutput = ""
     private var updateTimer: Timer?
     private let updateInterval: TimeInterval = 0.016
+    private var standardOutputANSISanitizer = ANSISanitizer()
+    private var standardErrorANSISanitizer = ANSISanitizer()
     
     public var isPinned: Bool {
         get {
@@ -337,20 +464,20 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         process?.standardError = errorPipe
         process?.standardInput = FileHandle.standardInput
 
-        // Tee output with better error handling
+        // Keep terminal output raw while sanitizing only the popup text.
         outputPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else {
                 handle.readabilityHandler = nil
                 return
             }
+            do {
+                try FileHandle.standardOutput.write(contentsOf: data)
+            } catch {
+                // Handle write error silently to avoid crashes
+            }
             if let str = String(data: data, encoding: .utf8) {
-                self?.appendOutput(str)
-                do {
-                    try FileHandle.standardOutput.write(contentsOf: data)
-                } catch {
-                    // Handle write error silently to avoid crashes
-                }
+                self?.appendOutput(str, from: .standardOutput)
             }
         }
         
@@ -360,13 +487,13 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 handle.readabilityHandler = nil
                 return
             }
+            do {
+                try FileHandle.standardError.write(contentsOf: data)
+            } catch {
+                // Handle write error silently to avoid crashes
+            }
             if let str = String(data: data, encoding: .utf8) {
-                self?.appendOutput(str)
-                do {
-                    try FileHandle.standardError.write(contentsOf: data)
-                } catch {
-                    // Handle write error silently to avoid crashes
-                }
+                self?.appendOutput(str, from: .standardError)
             }
         }
 
@@ -395,11 +522,21 @@ class LogPopupApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func appendOutput(_ str: String) {
+    private func appendOutput(_ str: String, from stream: OutputStream? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
-            self.pendingOutput += str
+
+            let popupText: String
+            switch stream {
+            case .standardOutput:
+                popupText = self.standardOutputANSISanitizer.sanitize(str)
+            case .standardError:
+                popupText = self.standardErrorANSISanitizer.sanitize(str)
+            case nil:
+                popupText = str
+            }
+
+            self.pendingOutput += popupText
             
             if self.updateTimer == nil {
                 self.updateTimer = Timer.scheduledTimer(withTimeInterval: self.updateInterval, repeats: false) { [weak self] _ in
